@@ -1,5 +1,5 @@
 const Doctor = require("../models/Doctor.js");
-const { deletePhotoFile } = require("../middleware/upload.js");
+const { deletePhotoFile } = require("../middleware/Upload.js");
 
 // =====================================================
 // ADD DOCTOR - ADMIN ONLY

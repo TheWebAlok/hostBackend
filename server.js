@@ -60,7 +60,7 @@ const allowedOrigins = [
   "http://localhost:5173",
 
   // 🔴 CHANGE THIS TO YOUR ACTUAL VERCEL FRONTEND URL
-  "https://YOUR-FRONTEND.vercel.app",
+  "https://hospital-31lx.vercel.app",
 ];
 
 // =====================================================

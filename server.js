@@ -29,7 +29,7 @@ const appointmentRoutes = require("./routes/appointmentRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const authRoutes = require("./routes/authRoutes");
 const prescriptionRoutes = require("./routes/prescriptionRoutes");
-
+const aiRoutes = require("./routes/aiRoutes");
 // =====================================================
 // DNS
 // =====================================================
@@ -119,7 +119,10 @@ app.use(
 // =====================================================
 // UPLOADS
 // =====================================================
-
+console.log(
+  "Uploads directory:",
+  path.join(__dirname, "uploads")
+);
 app.use(
   "/uploads",
   express.static(
@@ -130,7 +133,7 @@ app.use(
 // =====================================================
 // API ROUTES
 // =====================================================
-
+app.use("/api/ai", aiRoutes);
 app.use(
   "/api/doctors",
   doctorRoutes

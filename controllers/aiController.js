@@ -101,6 +101,123 @@ const isFeverMedicineQuestion = (message) => {
 };
 
 // =====================================================
+// GENERAL HEALTH / SYMPTOM / DIET GUIDANCE DETECTION
+// =====================================================
+// Catches questions like:
+//   "mujhe bukhar hai, kya khana chahiye?"
+//   "I have kidney problems, what should I eat and avoid?"
+//   "mujhe sugar hai, subah nashte me kya khaun?"
+//   "મને તાવ છે, શું ખાવું?"
+// i.e. symptom/condition words combined with a "what should I
+// do / eat / avoid / take care of" style guidance-seeking phrase.
+// This is intentionally broader than the fever-medicine detector
+// (which only fires for explicit medicine requests), and is
+// checked BEFORE the department-hint fast path so guidance
+// questions don't get short-circuited into a plain doctor list.
+// =====================================================
+
+const isHealthGuidanceQuestion = (message) => {
+  const text = message.toLowerCase().trim();
+
+  const symptomOrConditionWords = [
+    // symptoms
+    "fever",
+    "bukhar",
+    "बुखार",
+    "cold",
+    "cough",
+    "khansi",
+    "खांसी",
+    "headache",
+    "sir dard",
+    "सिर दर्द",
+    "vomit",
+    "ulti",
+    "उल्टी",
+    "loose motion",
+    "diarrhea",
+    "pain",
+    "dard",
+    "दर्द",
+    "weakness",
+    "kamzori",
+    "कमजोरी",
+    "acidity",
+    "gas",
+    "constipation",
+    "kabj",
+    "कब्ज",
+    // chronic conditions
+    "kidney",
+    "किडनी",
+    "diabetes",
+    "sugar",
+    "शुगर",
+    "blood pressure",
+    "bp",
+    "बीपी",
+    "pressure",
+    "cholesterol",
+    "कोलेस्ट्रॉल",
+    "thyroid",
+    "थायराइड",
+    "liver",
+    "लिवर",
+    "heart",
+    "हार्ट",
+    "asthma",
+    "pregnant",
+    "pregnancy",
+    "गर्भवती",
+    "anemia",
+    "khoon ki kami",
+    "uric acid",
+  ];
+
+  const guidanceWords = [
+    "kya khaun",
+    "kya khana",
+    "क्या खाऊं",
+    "क्या खाना",
+    "khana chahiye",
+    "खाना चाहिए",
+    "avoid",
+    "parhej",
+    "परहेज",
+    "diet",
+    "food",
+    "khana",
+    "खाना",
+    "nashta",
+    "नाश्ता",
+    "kya karu",
+    "क्या करूं",
+    "what should i eat",
+    "what should i do",
+    "what to eat",
+    "what to avoid",
+    "care",
+    "dekhbhal",
+    "देखभाल",
+    "precaution",
+    "सावधानी",
+    "khaun",
+    "kya na khaun",
+    "kya nahi khana",
+    "क्या न खाऊं",
+    "शું ખાવું", // gujarati: what to eat
+    "શું ખાવું",
+  ];
+
+  const hasSymptomOrCondition = symptomOrConditionWords.some((word) =>
+    text.includes(word)
+  );
+  const wantsGuidance = guidanceWords.some((word) => text.includes(word));
+
+  return hasSymptomOrCondition && wantsGuidance;
+};
+
+// =====================================================
 // GET SUITABLE DOCTOR
 // =====================================================
 
@@ -260,7 +377,108 @@ const chatWithAI = async (req, res) => {
     }
 
     // =====================================================
-    // 3. GET AVAILABLE SPECIALIZATIONS
+    // 3. GENERAL HEALTH / SYMPTOM / DIET GUIDANCE
+    // (multilingual, non-diagnostic, safety-first)
+    // =====================================================
+
+    if (isHealthGuidanceQuestion(userMessage)) {
+      const guidanceCompletion = await groq.chat.completions.create({
+        model: "openai/gpt-oss-20b",
+        messages: [
+          {
+            role: "system",
+            content: `
+You are a hospital AI health-guidance assistant.
+
+CRITICAL LANGUAGE RULE:
+- Detect the language/script the patient used (Hindi, English,
+  Hinglish, Gujarati, or any other language/mix).
+- Reply strictly in the SAME language and script the patient used.
+  Do not switch to English unless the patient wrote in English.
+
+You are NOT a doctor. You must NOT:
+- Give a definitive diagnosis.
+- Prescribe or name specific prescription medicines or dosages.
+- Give a rigid/strict diet chart for chronic conditions (like
+  kidney disease, diabetes, liver disease) without knowing the
+  stage, lab reports, or a doctor's evaluation. For such
+  conditions, give general, safe, widely-accepted dietary
+  direction (e.g. broad categories to prefer/limit) and clearly
+  say that an exact plan depends on their reports/stage and needs
+  a doctor or dietitian.
+
+For your response, when relevant to the patient's message, cover:
+1. Simple, general food/diet guidance (what generally helps, what
+   to limit or avoid).
+2. Basic self-care measures (rest, fluids/hydration, hygiene,
+   general precautions) where applicable.
+3. When they should see a doctor (timeframe / worsening signs).
+4. RED-FLAG / EMERGENCY WARNING: if the message mentions or implies
+   any serious/urgent signs (e.g. very high fever, difficulty
+   breathing, chest pain, severe/persistent vomiting, blood in
+   vomit/stool/urine, severe dehydration, confusion, fainting,
+   very low or very high blood pressure readings, suspected
+   kidney/heart/liver emergency, pregnancy complications, etc.),
+   clearly and prominently advise the patient to seek urgent/
+   emergency medical care immediately, in addition to any other
+   guidance.
+
+Keep the tone warm, simple, and easy to understand for a general
+patient (not overly clinical). Keep it reasonably concise (use
+short paragraphs or bullet points). Always end by recommending
+they consult a hospital doctor for proper evaluation and a
+personalized plan.
+`,
+          },
+          {
+            role: "user",
+            content: userMessage,
+          },
+        ],
+      });
+
+      const guidanceReply =
+        guidanceCompletion.choices?.[0]?.message?.content?.trim() ||
+        "Please consult a hospital doctor for proper evaluation.";
+
+      // Attach a suitable doctor recommendation alongside the
+      // guidance so the user has a clear next step.
+      const hintedForGuidance = detectDepartmentHints(userMessage);
+      let guidanceDoctors = [];
+      let guidanceSpecialization = null;
+
+      if (hintedForGuidance.length > 0) {
+        for (const hint of hintedForGuidance) {
+          const matches = await findDoctorsByName(hint);
+          if (matches.length > 0) {
+            guidanceDoctors = matches;
+            guidanceSpecialization = hint;
+            break;
+          }
+        }
+      }
+
+      if (guidanceDoctors.length === 0) {
+        const fallbackDoctor = await getSuitableDoctor();
+        if (fallbackDoctor) {
+          guidanceDoctors = [fallbackDoctor];
+          guidanceSpecialization =
+            fallbackDoctor.department || fallbackDoctor.specialization || null;
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        type: "HEALTH_GUIDANCE",
+        reply: guidanceReply,
+        specialization: guidanceSpecialization,
+        doctors: guidanceDoctors,
+        form: null,
+      });
+    }
+
+    // =====================================================
+    // 4. GET AVAILABLE SPECIALIZATIONS
     // =====================================================
 
     const doctors = await Doctor.find({
@@ -281,7 +499,7 @@ const chatWithAI = async (req, res) => {
     ];
 
     // =====================================================
-    // 4. FAST PATH: KEYWORD-BASED DEPARTMENT HINTS
+    // 5. FAST PATH: KEYWORD-BASED DEPARTMENT HINTS
     // Checks the symptom/department keyword map first so obvious
     // cases (kidney pain, heart pain, tooth pain, etc.) don't need
     // a Groq call at all. Falls back to Groq only if no hint
@@ -308,7 +526,7 @@ const chatWithAI = async (req, res) => {
     }
 
     // =====================================================
-    // 5. FALLBACK: ASK GROQ FOR SPECIALIZATION
+    // 6. FALLBACK: ASK GROQ FOR SPECIALIZATION
     // =====================================================
 
     if (!usedFastPath) {
@@ -348,7 +566,7 @@ RULES:
       console.log("AI Suggested Specialization:", aiSpecialization);
 
       // =====================================================
-      // 6. FIND ACTUAL DOCTORS (Groq path)
+      // 7. FIND ACTUAL DOCTORS (Groq path)
       // =====================================================
 
       if (aiSpecialization && aiSpecialization.toUpperCase() !== "NONE") {
@@ -357,7 +575,7 @@ RULES:
     }
 
     // =====================================================
-    // 7. FINAL NORMAL RESPONSE
+    // 8. FINAL NORMAL RESPONSE
     // =====================================================
 
     let reply;

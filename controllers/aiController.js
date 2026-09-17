@@ -124,13 +124,18 @@ const isFeverMedicineQuestion = (message) => {
 
 const buildGeneralHealthPrompt = (specialtiesList) => `
 You are a hospital AI assistant. A patient has sent you a message.
-It could be ANY kind of health-related question (symptom, disease,
-medicine, diet/nutrition, precaution, general medical knowledge,
-mental health, first aid, pregnancy, child health, elderly care,
-lab test meaning, etc.) — do not limit yourself to any fixed list
-of topics. It could also be a non-health message (e.g. asking to
-book an appointment, asking for a doctor directly, greetings,
-unrelated chit-chat).
+It could be:
+(a) A health-related question (symptom, disease, medicine, diet/
+    nutrition, precaution, general medical knowledge, mental
+    health, first aid, pregnancy, child health, elderly care, lab
+    test meaning, etc.) — do not limit yourself to any fixed list
+    of topics.
+(b) A request to find/book a doctor or department directly (e.g.
+    "mujhe cardiologist chahiye", "book an appointment", "kaunsa
+    doctor dikhau").
+(c) Anything else entirely unrelated to health or doctors — a
+    translation request, small talk, a greeting, a random sentence,
+    a general knowledge question, etc.
 
 CRITICAL LANGUAGE RULE:
 - Detect the language/script the patient used (Hindi, English,
@@ -146,10 +151,13 @@ You are NOT a doctor. You must NOT:
 - Give a rigid/strict diet chart for chronic conditions without
   knowing the stage, lab reports, or a doctor's evaluation.
 
-When the question IS health-related, your "reply" must be a real,
-accurate, specific, helpful answer to what was actually asked —
-not a vague "please see a doctor" non-answer. Depending on what's
-relevant, cover:
+Set "intent" to exactly one of: "health_question", "doctor_search",
+"other".
+
+CASE (a) health_question — set intent to "health_question". Your
+"reply" must be a real, accurate, specific, helpful answer to what
+was actually asked — not a vague "please see a doctor" non-answer.
+Depending on what's relevant, cover:
 1. A clear, correct answer to the actual question asked.
 2. General food/diet or self-care guidance if relevant (what
    generally helps, what to limit/avoid), framed as general safe
@@ -162,17 +170,23 @@ relevant, cover:
    BP readings, suspected kidney/heart/liver emergency, pregnancy
    complications, suicidal thoughts, etc.), clearly and prominently
    advise seeking urgent/emergency medical care immediately.
-
 Keep the tone warm, simple, and easy to understand for a general
 patient (not overly clinical). Keep it reasonably concise (short
-paragraphs or bullet points). If it is a genuine health question,
-end the reply by recommending they consult a hospital doctor for
-personalized evaluation.
+paragraphs or bullet points). End the reply by recommending they
+consult a hospital doctor for personalized evaluation.
 
-If the message is NOT a health question at all (e.g. just wants a
-doctor list, wants to book an appointment, greeting, unrelated),
-set "isHealthQuestion" to false and leave "reply" as an empty
-string — do not force an answer.
+CASE (b) doctor_search — set intent to "doctor_search". Leave
+"reply" as an empty string (the app will generate its own doctor-
+recommendation message). Just identify the best-matching
+"specialization" from the list below.
+
+CASE (c) other — set intent to "other". Give a short, normal,
+helpful, friendly "reply" to what the patient actually said
+(e.g. if they asked how to say something in English, just tell
+them; if it's small talk, respond naturally). Do NOT mention
+doctors, departments, or push them toward a medical consultation —
+that would be irrelevant and confusing for a non-health message.
+Set "specialization" to "NONE".
 
 Available hospital departments/specializations:
 ${specialtiesList.join(", ")}
@@ -180,8 +194,8 @@ ${specialtiesList.join(", ")}
 Respond with ONLY a raw JSON object, no markdown, no code fences,
 no extra text, in exactly this shape:
 {
-  "isHealthQuestion": true or false,
-  "reply": "the answer in the patient's language, or empty string",
+  "intent": "health_question" or "doctor_search" or "other",
+  "reply": "the answer in the patient's language, or empty string for doctor_search",
   "specialization": "the single closest exact name from the list above, or NONE"
 }
 `;
@@ -437,11 +451,65 @@ const chatWithAI = async (req, res) => {
 
     const rawGeneral =
       generalCompletion.choices?.[0]?.message?.content?.trim() || "";
-    const parsedGeneral = parseGeneralHealthJSON(rawGeneral);
+    let parsedGeneral = parseGeneralHealthJSON(rawGeneral);
 
     console.log("AI General Handler Output:", parsedGeneral || rawGeneral);
 
-    const isHealthQuestion = Boolean(parsedGeneral?.isHealthQuestion);
+    // =====================================================
+    // SAFETY NET: if Groq did not return valid JSON (can happen
+    // on very unusual / gibberish / random input like "lal pachal
+    // kuch bhi"), do NOT fall through to the doctor-search /
+    // "no matching doctor" message. Instead, make one plain,
+    // non-JSON follow-up call so the patient still gets a normal,
+    // direct answer to whatever they typed — this guarantees
+    // literally ANY input gets a real reply.
+    // =====================================================
+
+    if (!parsedGeneral || !parsedGeneral.intent) {
+      try {
+        const plainCompletion = await groq.chat.completions.create({
+          model: "openai/gpt-oss-20b",
+          messages: [
+            {
+              role: "system",
+              content: `
+You are a helpful hospital AI assistant. Reply naturally and
+helpfully to whatever the patient wrote, in the SAME language and
+script they used (Hindi, English, Hinglish, Gujarati, or any mix).
+Even if the message is random, unclear, gibberish, or unrelated to
+health, give your best short, friendly, natural response — never
+leave it unanswered, and never talk about doctors or departments
+unless the message is actually about health or finding a doctor.
+`,
+            },
+            {
+              role: "user",
+              content: userMessage,
+            },
+          ],
+        });
+
+        const plainReply =
+          plainCompletion.choices?.[0]?.message?.content?.trim() ||
+          "Maaf kijiye, main samajh nahi paaya. Kripya apna sawal dobara likhein.";
+
+        parsedGeneral = {
+          intent: "other",
+          reply: plainReply,
+          specialization: "NONE",
+        };
+      } catch (fallbackErr) {
+        console.error("General fallback Groq call failed:", fallbackErr);
+        parsedGeneral = {
+          intent: "other",
+          reply:
+            "Maaf kijiye, abhi main iska jawab nahi de pa raha. Kripya thodi der baad phir se poochhein.",
+          specialization: "NONE",
+        };
+      }
+    }
+
+    const intent = parsedGeneral?.intent || "other";
     let aiSpecialization =
       parsedGeneral?.specialization &&
       parsedGeneral.specialization.toUpperCase() !== "NONE"
@@ -449,10 +517,10 @@ const chatWithAI = async (req, res) => {
         : null;
 
     // =====================================================
-    // 6a. IT IS A REAL HEALTH QUESTION -> answer it directly
+    // 6a. REAL HEALTH QUESTION -> answer it directly
     // =====================================================
 
-    if (isHealthQuestion) {
+    if (intent === "health_question") {
       const healthReply =
         parsedGeneral?.reply?.trim() ||
         "Please consult a hospital doctor for proper evaluation.";
@@ -489,8 +557,32 @@ const chatWithAI = async (req, res) => {
     }
 
     // =====================================================
-    // 6b. NOT A HEALTH QUESTION -> treat as a plain
-    // doctor/department search (old behaviour)
+    // 6b. UNRELATED / NON-HEALTH MESSAGE ("other")
+    // e.g. "mujhe ghar jana hai, isko english mein kya bolte hain?",
+    // small talk, greetings, general knowledge — nothing to do
+    // with health or doctors. Answer it directly and naturally;
+    // do NOT push a doctor recommendation or the "no matching
+    // doctor" fallback message onto an unrelated question.
+    // =====================================================
+
+    if (intent === "other") {
+      const otherReply =
+        parsedGeneral?.reply?.trim() ||
+        "Main is baare mein abhi madad nahi kar pa raha. Kripya apna sawal thoda alag tarike se poochhein.";
+
+      return res.status(200).json({
+        success: true,
+        type: "GENERAL_CHAT",
+        reply: otherReply,
+        specialization: null,
+        doctors: [],
+        form: null,
+      });
+    }
+
+    // =====================================================
+    // 6c. DOCTOR / DEPARTMENT SEARCH ("doctor_search", and the
+    // default fallback if Groq's output couldn't be parsed)
     // =====================================================
 
     let recommendedDoctors = fastPathDoctors;

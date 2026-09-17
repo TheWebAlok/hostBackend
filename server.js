@@ -61,6 +61,7 @@ const allowedOrigins = [
 
   // 🔴 CHANGE THIS TO YOUR ACTUAL VERCEL FRONTEND URL
   "https://hospital-31lx.vercel.app",
+  "https://hospital-olive-two.vercel.app",
 ];
 
 // =====================================================

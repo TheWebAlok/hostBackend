@@ -74,12 +74,14 @@ const isHospitalServicesQuestion = (message) => {
 
 // =====================================================
 // FEVER MEDICINE QUESTION DETECTION
+// (this is the flow that triggers the structured fever FORM,
+//  not a general "tell me about this medicine" question)
 // =====================================================
 
 const isFeverMedicineQuestion = (message) => {
   const text = message.toLowerCase().trim();
 
-  const feverWords = ["fever", "bukhar", "temperature", "high temperature"];
+  const feverWords = ["fever", "bukhar", "बुखार", "temperature", "high temperature"];
 
   const medicineWords = [
     "medicine",
@@ -101,120 +103,106 @@ const isFeverMedicineQuestion = (message) => {
 };
 
 // =====================================================
-// GENERAL HEALTH / SYMPTOM / DIET GUIDANCE DETECTION
+// GENERAL HEALTH QUESTION HANDLING (covers ANY question)
 // =====================================================
-// Catches questions like:
-//   "mujhe bukhar hai, kya khana chahiye?"
-//   "I have kidney problems, what should I eat and avoid?"
-//   "mujhe sugar hai, subah nashte me kya khaun?"
-//   "મને તાવ છે, શું ખાવું?"
-// i.e. symptom/condition words combined with a "what should I
-// do / eat / avoid / take care of" style guidance-seeking phrase.
-// This is intentionally broader than the fever-medicine detector
-// (which only fires for explicit medicine requests), and is
-// checked BEFORE the department-hint fast path so guidance
-// questions don't get short-circuited into a plain doctor list.
+// Instead of matching against a fixed list of keywords (which can
+// never cover every possible way a patient phrases a question),
+// every message that isn't hospital-services or the fever-form
+// trigger is sent to Groq ONCE, asking it to:
+//   1. Decide whether this is a health-related question at all
+//      (symptom, disease, medicine, diet, precaution, general
+//      medical knowledge, mental health, etc. — anything at all).
+//   2. If yes, give a proper, safe, accurate answer to THAT exact
+//      question (not a generic "see a doctor" non-answer).
+//   3. Identify the closest matching hospital department/
+//      specialization from the provided list, if any, so we can
+//      still recommend a relevant doctor.
+// This lets a patient ask literally anything health-related and
+// get a real answer, instead of only the handful of patterns the
+// old keyword lists happened to cover.
 // =====================================================
 
-const isHealthGuidanceQuestion = (message) => {
-  const text = message.toLowerCase().trim();
+const buildGeneralHealthPrompt = (specialtiesList) => `
+You are a hospital AI assistant. A patient has sent you a message.
+It could be ANY kind of health-related question (symptom, disease,
+medicine, diet/nutrition, precaution, general medical knowledge,
+mental health, first aid, pregnancy, child health, elderly care,
+lab test meaning, etc.) — do not limit yourself to any fixed list
+of topics. It could also be a non-health message (e.g. asking to
+book an appointment, asking for a doctor directly, greetings,
+unrelated chit-chat).
 
-  const symptomOrConditionWords = [
-    // symptoms
-    "fever",
-    "bukhar",
-    "बुखार",
-    "cold",
-    "cough",
-    "khansi",
-    "खांसी",
-    "headache",
-    "sir dard",
-    "सिर दर्द",
-    "vomit",
-    "ulti",
-    "उल्टी",
-    "loose motion",
-    "diarrhea",
-    "pain",
-    "dard",
-    "दर्द",
-    "weakness",
-    "kamzori",
-    "कमजोरी",
-    "acidity",
-    "gas",
-    "constipation",
-    "kabj",
-    "कब्ज",
-    // chronic conditions
-    "kidney",
-    "किडनी",
-    "diabetes",
-    "sugar",
-    "शुगर",
-    "blood pressure",
-    "bp",
-    "बीपी",
-    "pressure",
-    "cholesterol",
-    "कोलेस्ट्रॉल",
-    "thyroid",
-    "थायराइड",
-    "liver",
-    "लिवर",
-    "heart",
-    "हार्ट",
-    "asthma",
-    "pregnant",
-    "pregnancy",
-    "गर्भवती",
-    "anemia",
-    "khoon ki kami",
-    "uric acid",
-  ];
+CRITICAL LANGUAGE RULE:
+- Detect the language/script the patient used (Hindi, English,
+  Hinglish, Gujarati, or any other language/mix).
+- Your "reply" field must be strictly in the SAME language and
+  script the patient used. Do not switch to English unless the
+  patient wrote in English.
 
-  const guidanceWords = [
-    "kya khaun",
-    "kya khana",
-    "क्या खाऊं",
-    "क्या खाना",
-    "khana chahiye",
-    "खाना चाहिए",
-    "avoid",
-    "parhej",
-    "परहेज",
-    "diet",
-    "food",
-    "khana",
-    "खाना",
-    "nashta",
-    "नाश्ता",
-    "kya karu",
-    "क्या करूं",
-    "what should i eat",
-    "what should i do",
-    "what to eat",
-    "what to avoid",
-    "care",
-    "dekhbhal",
-    "देखभाल",
-    "precaution",
-    "सावधानी",
-    "khaun",
-    "kya na khaun",
-    "kya nahi khana",
-    "क्या न खाऊं",
-    "शું ખાવું", // gujarati: what to eat
-    "શું ખાવું",
-  ];
+You are NOT a doctor. You must NOT:
+- Give a definitive diagnosis.
+- Prescribe or name specific prescription medicines with exact
+  personalized dosages.
+- Give a rigid/strict diet chart for chronic conditions without
+  knowing the stage, lab reports, or a doctor's evaluation.
 
-  const hasSymptomOrCondition = symptomOrConditionWords.some((word) =>
-    text.includes(word)
-  );
-  const wantsGuidance = guidanceWords.some((word) => text.includes(word));
+When the question IS health-related, your "reply" must be a real,
+accurate, specific, helpful answer to what was actually asked —
+not a vague "please see a doctor" non-answer. Depending on what's
+relevant, cover:
+1. A clear, correct answer to the actual question asked.
+2. General food/diet or self-care guidance if relevant (what
+   generally helps, what to limit/avoid), framed as general safe
+   information, not a rigid personalized plan.
+3. When they should see a doctor (timeframe / worsening signs).
+4. RED-FLAG / EMERGENCY WARNING: if the message mentions or implies
+   any serious/urgent signs (very high fever, difficulty breathing,
+   chest pain, severe/persistent vomiting, blood in vomit/stool/
+   urine, severe dehydration, confusion, fainting, very abnormal
+   BP readings, suspected kidney/heart/liver emergency, pregnancy
+   complications, suicidal thoughts, etc.), clearly and prominently
+   advise seeking urgent/emergency medical care immediately.
 
-  return hasSymptomOrCondition && wantsGuidance;
+Keep the tone warm, simple, and easy to understand for a general
+patient (not overly clinical). Keep it reasonably concise (short
+paragraphs or bullet points). If it is a genuine health question,
+end the reply by recommending they consult a hospital doctor for
+personalized evaluation.
+
+If the message is NOT a health question at all (e.g. just wants a
+doctor list, wants to book an appointment, greeting, unrelated),
+set "isHealthQuestion" to false and leave "reply" as an empty
+string — do not force an answer.
+
+Available hospital departments/specializations:
+${specialtiesList.join(", ")}
+
+Respond with ONLY a raw JSON object, no markdown, no code fences,
+no extra text, in exactly this shape:
+{
+  "isHealthQuestion": true or false,
+  "reply": "the answer in the patient's language, or empty string",
+  "specialization": "the single closest exact name from the list above, or NONE"
+}
+`;
+
+const parseGeneralHealthJSON = (raw) => {
+  if (!raw) return null;
+  const cleaned = raw.replace(/```json|```/gi, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (err) {
+    // try to salvage a JSON object embedded in extra text
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch (innerErr) {
+        return null;
+      }
+    }
+    return null;
+  }
 };
 
 // =====================================================
@@ -313,7 +301,7 @@ const chatWithAI = async (req, res) => {
     }
 
     // =====================================================
-    // 2. FEVER MEDICINE QUESTION
+    // 2. FEVER MEDICINE QUESTION -> structured fever FORM
     // =====================================================
 
     if (isFeverMedicineQuestion(userMessage)) {
@@ -377,108 +365,8 @@ const chatWithAI = async (req, res) => {
     }
 
     // =====================================================
-    // 3. GENERAL HEALTH / SYMPTOM / DIET GUIDANCE
-    // (multilingual, non-diagnostic, safety-first)
-    // =====================================================
-
-    if (isHealthGuidanceQuestion(userMessage)) {
-      const guidanceCompletion = await groq.chat.completions.create({
-        model: "openai/gpt-oss-20b",
-        messages: [
-          {
-            role: "system",
-            content: `
-You are a hospital AI health-guidance assistant.
-
-CRITICAL LANGUAGE RULE:
-- Detect the language/script the patient used (Hindi, English,
-  Hinglish, Gujarati, or any other language/mix).
-- Reply strictly in the SAME language and script the patient used.
-  Do not switch to English unless the patient wrote in English.
-
-You are NOT a doctor. You must NOT:
-- Give a definitive diagnosis.
-- Prescribe or name specific prescription medicines or dosages.
-- Give a rigid/strict diet chart for chronic conditions (like
-  kidney disease, diabetes, liver disease) without knowing the
-  stage, lab reports, or a doctor's evaluation. For such
-  conditions, give general, safe, widely-accepted dietary
-  direction (e.g. broad categories to prefer/limit) and clearly
-  say that an exact plan depends on their reports/stage and needs
-  a doctor or dietitian.
-
-For your response, when relevant to the patient's message, cover:
-1. Simple, general food/diet guidance (what generally helps, what
-   to limit or avoid).
-2. Basic self-care measures (rest, fluids/hydration, hygiene,
-   general precautions) where applicable.
-3. When they should see a doctor (timeframe / worsening signs).
-4. RED-FLAG / EMERGENCY WARNING: if the message mentions or implies
-   any serious/urgent signs (e.g. very high fever, difficulty
-   breathing, chest pain, severe/persistent vomiting, blood in
-   vomit/stool/urine, severe dehydration, confusion, fainting,
-   very low or very high blood pressure readings, suspected
-   kidney/heart/liver emergency, pregnancy complications, etc.),
-   clearly and prominently advise the patient to seek urgent/
-   emergency medical care immediately, in addition to any other
-   guidance.
-
-Keep the tone warm, simple, and easy to understand for a general
-patient (not overly clinical). Keep it reasonably concise (use
-short paragraphs or bullet points). Always end by recommending
-they consult a hospital doctor for proper evaluation and a
-personalized plan.
-`,
-          },
-          {
-            role: "user",
-            content: userMessage,
-          },
-        ],
-      });
-
-      const guidanceReply =
-        guidanceCompletion.choices?.[0]?.message?.content?.trim() ||
-        "Please consult a hospital doctor for proper evaluation.";
-
-      // Attach a suitable doctor recommendation alongside the
-      // guidance so the user has a clear next step.
-      const hintedForGuidance = detectDepartmentHints(userMessage);
-      let guidanceDoctors = [];
-      let guidanceSpecialization = null;
-
-      if (hintedForGuidance.length > 0) {
-        for (const hint of hintedForGuidance) {
-          const matches = await findDoctorsByName(hint);
-          if (matches.length > 0) {
-            guidanceDoctors = matches;
-            guidanceSpecialization = hint;
-            break;
-          }
-        }
-      }
-
-      if (guidanceDoctors.length === 0) {
-        const fallbackDoctor = await getSuitableDoctor();
-        if (fallbackDoctor) {
-          guidanceDoctors = [fallbackDoctor];
-          guidanceSpecialization =
-            fallbackDoctor.department || fallbackDoctor.specialization || null;
-        }
-      }
-
-      return res.status(200).json({
-        success: true,
-        type: "HEALTH_GUIDANCE",
-        reply: guidanceReply,
-        specialization: guidanceSpecialization,
-        doctors: guidanceDoctors,
-        form: null,
-      });
-    }
-
-    // =====================================================
-    // 4. GET AVAILABLE SPECIALIZATIONS
+    // 3. GET AVAILABLE SPECIALIZATIONS (needed either way, for
+    //    department matching)
     // =====================================================
 
     const doctors = await Doctor.find({
@@ -499,84 +387,121 @@ personalized plan.
     ];
 
     // =====================================================
-    // 5. FAST PATH: KEYWORD-BASED DEPARTMENT HINTS
-    // Checks the symptom/department keyword map first so obvious
-    // cases (kidney pain, heart pain, tooth pain, etc.) don't need
-    // a Groq call at all. Falls back to Groq only if no hint
-    // matches, or a hinted department has no doctors in the DB.
+    // 4. FAST PATH: KEYWORD-BASED DEPARTMENT HINTS
+    // Cheap, deterministic check for obvious "find me a doctor"
+    // style messages (kidney pain, heart pain, tooth pain, etc.)
+    // so those don't need a Groq round-trip at all. Anything that
+    // doesn't hit this fast path goes to the general health
+    // question/answer handler below, which can also still resolve
+    // a department on its own.
     // =====================================================
 
-    let aiSpecialization = null;
-    let recommendedDoctors = [];
-    let usedFastPath = false;
-
     const hintedDepartments = detectDepartmentHints(userMessage);
+    let fastPathDoctors = [];
+    let fastPathSpecialization = null;
 
     if (hintedDepartments.length > 0) {
       for (const hint of hintedDepartments) {
         const matches = await findDoctorsByName(hint);
-
         if (matches.length > 0) {
-          recommendedDoctors = matches;
-          aiSpecialization = hint;
-          usedFastPath = true;
+          fastPathDoctors = matches;
+          fastPathSpecialization = hint;
           break;
         }
       }
     }
 
     // =====================================================
-    // 6. FALLBACK: ASK GROQ FOR SPECIALIZATION
+    // 5. GENERAL HEALTH QUESTION / ANSWER HANDLER
+    // This is the main upgrade: ANY message that reaches this
+    // point (not hospital-services, not the fever-form trigger)
+    // is sent to Groq once. Groq itself decides whether it's a
+    // real health question and, if so, gives a proper direct
+    // answer — instead of relying on a fixed keyword list that
+    // can never cover every way a patient might ask something.
     // =====================================================
 
-    if (!usedFastPath) {
-      const completion = await groq.chat.completions.create({
-        model: "openai/gpt-oss-20b",
-        messages: [
-          {
-            role: "system",
-            content: `
-You are a hospital AI assistant.
+    const generalCompletion = await groq.chat.completions.create({
+      model: "openai/gpt-oss-20b",
+      messages: [
+        {
+          role: "system",
+          content: buildGeneralHealthPrompt(specialties),
+        },
+        {
+          role: "user",
+          content: userMessage,
+        },
+      ],
+    });
 
-Available departments and specializations:
+    const rawGeneral =
+      generalCompletion.choices?.[0]?.message?.content?.trim() || "";
+    const parsedGeneral = parseGeneralHealthJSON(rawGeneral);
 
-${specialties.join(", ")}
+    console.log("AI General Handler Output:", parsedGeneral || rawGeneral);
 
-Identify the most relevant department or specialization
-from the list.
+    const isHealthQuestion = Boolean(parsedGeneral?.isHealthQuestion);
+    let aiSpecialization =
+      parsedGeneral?.specialization &&
+      parsedGeneral.specialization.toUpperCase() !== "NONE"
+        ? parsedGeneral.specialization.replace(/^["']|["']$/g, "")
+        : null;
 
-RULES:
+    // =====================================================
+    // 6a. IT IS A REAL HEALTH QUESTION -> answer it directly
+    // =====================================================
 
-1. Return ONLY one exact name from the list.
-2. Never invent a specialization.
-3. Do not explain.
-4. If there is no suitable match return NONE.
-`,
-          },
-          {
-            role: "user",
-            content: userMessage,
-          },
-        ],
-      });
+    if (isHealthQuestion) {
+      const healthReply =
+        parsedGeneral?.reply?.trim() ||
+        "Please consult a hospital doctor for proper evaluation.";
 
-      aiSpecialization = completion.choices?.[0]?.message?.content?.trim();
-      aiSpecialization = aiSpecialization?.replace(/^["']|["']$/g, "");
+      // Prefer the fast-path department match (more reliable,
+      // deterministic) if we found one; otherwise fall back to
+      // whatever Groq identified, otherwise the safe default
+      // "general medicine" doctor.
+      let doctors = fastPathDoctors;
+      let specialization = fastPathSpecialization;
 
-      console.log("AI Suggested Specialization:", aiSpecialization);
-
-      // =====================================================
-      // 7. FIND ACTUAL DOCTORS (Groq path)
-      // =====================================================
-
-      if (aiSpecialization && aiSpecialization.toUpperCase() !== "NONE") {
-        recommendedDoctors = await findDoctorsByName(aiSpecialization);
+      if (doctors.length === 0 && aiSpecialization) {
+        doctors = await findDoctorsByName(aiSpecialization);
+        specialization = doctors.length > 0 ? aiSpecialization : null;
       }
+
+      if (doctors.length === 0) {
+        const fallbackDoctor = await getSuitableDoctor();
+        if (fallbackDoctor) {
+          doctors = [fallbackDoctor];
+          specialization =
+            fallbackDoctor.department || fallbackDoctor.specialization || null;
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        type: "HEALTH_ANSWER",
+        reply: healthReply,
+        specialization,
+        doctors,
+        form: null,
+      });
     }
 
     // =====================================================
-    // 8. FINAL NORMAL RESPONSE
+    // 6b. NOT A HEALTH QUESTION -> treat as a plain
+    // doctor/department search (old behaviour)
     // =====================================================
+
+    let recommendedDoctors = fastPathDoctors;
+
+    if (recommendedDoctors.length === 0 && aiSpecialization) {
+      recommendedDoctors = await findDoctorsByName(aiSpecialization);
+    }
+
+    if (fastPathSpecialization) {
+      aiSpecialization = fastPathSpecialization;
+    }
 
     let reply;
 
@@ -595,10 +520,7 @@ Please consult a qualified doctor for proper evaluation.
       success: true,
       type: "GENERAL",
       reply,
-      specialization:
-        aiSpecialization && aiSpecialization.toUpperCase() !== "NONE"
-          ? aiSpecialization
-          : null,
+      specialization: aiSpecialization || null,
       doctors: recommendedDoctors,
       form: null,
     });
